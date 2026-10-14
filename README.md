@@ -135,11 +135,11 @@ sequenceDiagram
     participant MQ as RabbitMQ
     participant W as consumer
     C->>A: POST /payments (Idempotency-Key)
-    A->>DB: BEGIN; INSERT payment ON CONFLICT DO NOTHING; INSERT outbox; COMMIT
+    A->>DB: BEGIN → INSERT payment ON CONFLICT DO NOTHING → INSERT outbox → COMMIT
     A-->>C: 202 {payment_id, pending}
     R->>DB: lock unpublished outbox rows (SKIP LOCKED)
     R->>MQ: publish payments.new (persistent, confirm)
-    R->>DB: published_at = now(); COMMIT
+    R->>DB: published_at = now(), COMMIT
     MQ->>W: deliver payments.new
     W->>DB: status pending? → gateway (2–5 s)
     W->>DB: UPDATE … SET status WHERE status = 'pending'
