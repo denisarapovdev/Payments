@@ -1,0 +1,92 @@
+name: payments
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: payments:local
+  restart: unless-stopped
+  environment: &app-env
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    API_KEY: ${API_KEY:-dev-secret-api-key}
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments}@postgres:5432/${POSTGRES_DB:-payments}
+    RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+    MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+    RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-2}
+    RETRY_MULTIPLIER: ${RETRY_MULTIPLIER:-2}
+    GATEWAY_SUCCESS_RATE: ${GATEWAY_SUCCESS_RATE:-0.9}
+    WEBHOOK_TIMEOUT: ${WEBHOOK_TIMEOUT:-5}
+    WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-webhook-secret}
+  depends_on: &app-deps
+    postgres:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payments}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payments}
+      POSTGRES_DB: ${POSTGRES_DB:-payments}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672" # management UI, guest/guest
+    volumes: [rabbitdata:/var/lib/rabbitmq]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  outbox-relay:
+    <<: *app
+    command: ["python", "-m", "payments.workers.outbox_relay"]
+
+  consumer:
+    <<: *app
+    command: ["python", "-m", "payments.workers.consumer"]
+    stop_grace_period: 20s # let the in-flight message finish (gateway takes up to 5s)
+
+  webhook-mock:
+    <<: *app
+    command: ["uvicorn", "--app-dir", "tools", "webhook_mock:app", "--host", "0.0.0.0", "--port", "9000"]
+    ports: ["9000:9000"]
+    environment:
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-webhook-secret}
+      WEBHOOK_MOCK_FAIL_RATE: ${WEBHOOK_MOCK_FAIL_RATE:-0}
+    depends_on: []
+
+volumes:
+  pgdata:
+  rabbitdata:
