@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      # integration tests start PostgreSQL via testcontainers (Docker is available on the runner)
+      - run: uv run pytest -v
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: docker compose up --build -d
+      - run: timeout 120 bash -c 'until curl -sf localhost:8000/health/ready; do sleep 2; done'
+      - run: uv sync --frozen && uv run python scripts/e2e.py
+      - if: failure()
+        run: docker compose logs
